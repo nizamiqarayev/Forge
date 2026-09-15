@@ -1,0 +1,237 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+)
+
+const (
+	supportedApp = "hello-api"
+	container    = "forge-hello-api"
+	image        = "hello-api:local"
+	dockerfile   = "examples/hello-api/Dockerfile"
+)
+
+const usage = `Forge operates local application workloads.
+
+Usage:
+  forge <command> [options] <application>
+
+Available commands:
+  deploy  Build and start an application
+  status  Show an application's container status
+  logs    Show an application's container logs
+  stop    Stop an application gracefully
+  delete  Delete a stopped application container
+  help    Show this help message
+
+Deploy options:
+  --port  Host port to publish (default 8080)
+`
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	return runWithDocker(ctx, args, stdout, stderr, execDockerRunner{})
+}
+
+func runWithDocker(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	docker dockerRunner,
+) error {
+	if len(args) == 0 {
+		return writeUsage(stdout)
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		return writeUsage(stdout)
+	case "deploy":
+		return runDeploy(ctx, args[1:], stdout, stderr, docker)
+	case "status":
+		return runStatus(ctx, args[1:], stdout, docker)
+	case "logs":
+		return runLogs(ctx, args[1:], stdout, stderr, docker)
+	case "stop":
+		return runStop(ctx, args[1:], stdout, stderr, docker)
+	case "delete":
+		return runDelete(ctx, args[1:], stdout, stderr, docker)
+	default:
+		return fmt.Errorf("unknown command %q; run %q for usage", args[0], "forge help")
+	}
+}
+
+func runDeploy(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	docker dockerRunner,
+) error {
+	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	port := flags.Int("port", 8080, "host port to publish")
+	if err := flags.Parse(args); err != nil {
+		return fmt.Errorf("parse deploy options: %w", err)
+	}
+
+	app, err := validateAppArgs("deploy", flags.Args())
+	if err != nil {
+		return err
+	}
+	if *port < 1 || *port > 65535 {
+		return fmt.Errorf("deploy port must be between 1 and 65535")
+	}
+
+	existing, err := docker.Output(
+		ctx,
+		"container", "ls",
+		"--all",
+		"--quiet",
+		"--filter", "name=^/"+container+"$",
+	)
+	if err != nil {
+		return fmt.Errorf("check existing %s deployment: %w", app, err)
+	}
+	if strings.TrimSpace(existing) != "" {
+		return fmt.Errorf("%s is already deployed; stop and delete it before deploying again", app)
+	}
+
+	if err := writeString(stdout, "Building "+app+" image...\n", "deploy output"); err != nil {
+		return err
+	}
+	if err := docker.Run(
+		ctx,
+		stdout,
+		stderr,
+		"build",
+		"--file", dockerfile,
+		"--tag", image,
+		".",
+	); err != nil {
+		return fmt.Errorf("build %s image: %w", app, err)
+	}
+
+	if err := writeString(stdout, "Built "+image+"\nStarting "+app+"...\n", "deploy output"); err != nil {
+		return err
+	}
+	if err := docker.Run(
+		ctx,
+		stdout,
+		stderr,
+		"run",
+		"--detach",
+		"--name", container,
+		"--label", "forge.managed=true",
+		"--label", "forge.app="+app,
+		"--publish", strconv.Itoa(*port)+":8080",
+		image,
+	); err != nil {
+		return fmt.Errorf("start %s container: %w", app, err)
+	}
+
+	return writeString(
+		stdout,
+		fmt.Sprintf("Deployed %s\nContainer: %s\nURL: http://localhost:%d\n", app, container, *port),
+		"deploy output",
+	)
+}
+
+func runStatus(ctx context.Context, args []string, stdout io.Writer, docker dockerRunner) error {
+	app, err := validateAppArgs("status", args)
+	if err != nil {
+		return err
+	}
+
+	status, err := docker.Output(
+		ctx,
+		"container", "inspect",
+		"--format", "Container: "+container+"\nStatus: {{.State.Status}}\nImage: {{.Config.Image}}\nPorts: {{json .NetworkSettings.Ports}}",
+		container,
+	)
+	if err != nil {
+		return fmt.Errorf("inspect %s deployment: %w", app, err)
+	}
+
+	if !strings.HasSuffix(status, "\n") {
+		status += "\n"
+	}
+	return writeString(stdout, status, "status output")
+}
+
+func runLogs(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	docker dockerRunner,
+) error {
+	app, err := validateAppArgs("logs", args)
+	if err != nil {
+		return err
+	}
+	if err := docker.Run(ctx, stdout, stderr, "logs", container); err != nil {
+		return fmt.Errorf("read %s logs: %w", app, err)
+	}
+	return nil
+}
+
+func runStop(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	docker dockerRunner,
+) error {
+	app, err := validateAppArgs("stop", args)
+	if err != nil {
+		return err
+	}
+	if err := docker.Run(ctx, stdout, stderr, "stop", "--timeout", "10", container); err != nil {
+		return fmt.Errorf("stop %s: %w", app, err)
+	}
+	return writeString(stdout, "Stopped "+app+"\n", "stop output")
+}
+
+func runDelete(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	docker dockerRunner,
+) error {
+	app, err := validateAppArgs("delete", args)
+	if err != nil {
+		return err
+	}
+	if err := docker.Run(ctx, stdout, stderr, "container", "rm", container); err != nil {
+		return fmt.Errorf("delete %s: %w", app, err)
+	}
+	return writeString(stdout, "Deleted "+app+" container\n", "delete output")
+}
+
+func validateAppArgs(command string, args []string) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("%s expects exactly one app name", command)
+	}
+	if args[0] != supportedApp {
+		return "", fmt.Errorf("unsupported app %q; only %q is supported", args[0], supportedApp)
+	}
+	return args[0], nil
+}
+
+func writeUsage(w io.Writer) error {
+	return writeString(w, usage, "usage")
+}
+
+func writeString(w io.Writer, value, description string) error {
+	if _, err := io.WriteString(w, value); err != nil {
+		return fmt.Errorf("write %s: %w", description, err)
+	}
+	return nil
+}

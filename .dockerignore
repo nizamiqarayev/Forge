@@ -1,0 +1,8 @@
+.git
+.gitignore
+.dockerignore
+bin/
+docs/
+infra/
+AGENTS.md
+README.md

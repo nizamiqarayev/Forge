@@ -50,3 +50,17 @@ func TestHealth(t *testing.T) {
 		t.Errorf("GET /healthz body = %q, want %q", got, "ok\\n")
 	}
 }
+
+func TestRoot(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	recorder := httptest.NewRecorder()
+
+	routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if got := recorder.Body.String(); got != "Hello API is running\n" {
+		t.Errorf("GET / body = %q, want %q", got, "Hello API is running\\n")
+	}
+}
