@@ -41,3 +41,12 @@ jobs:
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin     
+  
+      - name: Publish hello-api image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/forge-hello-api:${{ github.sha }}
+        run: |
+          docker tag hello-api:ci "$IMAGE"
+          docker push "$IMAGE"
+          echo "Published $IMAGE"
