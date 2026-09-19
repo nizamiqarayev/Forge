@@ -68,6 +68,10 @@ something real to operate. It includes:
 Milestone 1 adds the first `forge` CLI. It builds, starts, inspects, logs, stops,
 and deletes the `hello-api` container through explicit Docker operations.
 
+Milestone 2 makes deployment health-aware. Forge waits for `/healthz` before
+reporting success, times out failed starts, preserves failed containers for
+inspection, and includes application health in `forge status`.
+
 ## Forge CLI
 
 Build the CLI:
@@ -99,7 +103,9 @@ Operate the deployed workload:
 
 Forge names the container `forge-hello-api` and labels it with
 `forge.managed=true` and `forge.app=hello-api`. Deploy refuses to replace an
-existing container; stop and delete it explicitly before deploying again.
+existing container; stop and delete it explicitly before deploying again. A
+deployment is successful only after the workload returns HTTP 200 from
+`/healthz` within 15 seconds.
 
 ## Run the Service
 

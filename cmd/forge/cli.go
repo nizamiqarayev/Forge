@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -14,6 +15,8 @@ const (
 	container    = "forge-hello-api"
 	image        = "hello-api:local"
 	dockerfile   = "examples/hello-api/Dockerfile"
+	healthPath   = "/healthz"
+	healthWait   = 15 * time.Second
 )
 
 const usage = `Forge operates local application workloads.
@@ -34,15 +37,23 @@ Deploy options:
 `
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	return runWithDocker(ctx, args, stdout, stderr, execDockerRunner{})
+	return runWithDependencies(
+		ctx,
+		args,
+		stdout,
+		stderr,
+		execDockerRunner{},
+		newHTTPHealthChecker(),
+	)
 }
 
-func runWithDocker(
+func runWithDependencies(
 	ctx context.Context,
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
 	docker dockerRunner,
+	health healthChecker,
 ) error {
 	if len(args) == 0 {
 		return writeUsage(stdout)
@@ -52,9 +63,9 @@ func runWithDocker(
 	case "help", "-h", "--help":
 		return writeUsage(stdout)
 	case "deploy":
-		return runDeploy(ctx, args[1:], stdout, stderr, docker)
+		return runDeploy(ctx, args[1:], stdout, stderr, docker, health)
 	case "status":
-		return runStatus(ctx, args[1:], stdout, docker)
+		return runStatus(ctx, args[1:], stdout, docker, health)
 	case "logs":
 		return runLogs(ctx, args[1:], stdout, stderr, docker)
 	case "stop":
@@ -72,6 +83,7 @@ func runDeploy(
 	stdout io.Writer,
 	stderr io.Writer,
 	docker dockerRunner,
+	health healthChecker,
 ) error {
 	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -129,10 +141,21 @@ func runDeploy(
 		"--name", container,
 		"--label", "forge.managed=true",
 		"--label", "forge.app="+app,
+		"--label", "forge.host-port="+strconv.Itoa(*port),
 		"--publish", strconv.Itoa(*port)+":8080",
 		image,
 	); err != nil {
 		return fmt.Errorf("start %s container: %w", app, err)
+	}
+
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", *port, healthPath)
+	if err := writeString(stdout, "Waiting for "+app+" health...\n", "deploy output"); err != nil {
+		return err
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, healthWait)
+	defer cancel()
+	if err := health.Wait(healthCtx, healthURL); err != nil {
+		return fmt.Errorf("wait for %s health: %w", app, err)
 	}
 
 	return writeString(
@@ -142,26 +165,61 @@ func runDeploy(
 	)
 }
 
-func runStatus(ctx context.Context, args []string, stdout io.Writer, docker dockerRunner) error {
+func runStatus(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	docker dockerRunner,
+	health healthChecker,
+) error {
 	app, err := validateAppArgs("status", args)
 	if err != nil {
 		return err
 	}
 
-	status, err := docker.Output(
+	state, err := docker.Output(
 		ctx,
 		"container", "inspect",
-		"--format", "Container: "+container+"\nStatus: {{.State.Status}}\nImage: {{.Config.Image}}\nPorts: {{json .NetworkSettings.Ports}}",
+		"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}`,
 		container,
 	)
 	if err != nil {
 		return fmt.Errorf("inspect %s deployment: %w", app, err)
 	}
 
-	if !strings.HasSuffix(status, "\n") {
-		status += "\n"
+	parts := strings.SplitN(strings.TrimSpace(state), "|", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("inspect %s deployment: unexpected Docker output %q", app, state)
 	}
-	return writeString(stdout, status, "status output")
+	containerState, hostPort := parts[0], parts[1]
+	healthState := "unavailable"
+	url := "-"
+	if hostPort != "" {
+		url = "http://localhost:" + hostPort
+	}
+	if containerState == "running" && hostPort != "" {
+		healthCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := health.Wait(healthCtx, "http://127.0.0.1:"+hostPort+healthPath)
+		cancel()
+		if err == nil {
+			healthState = "healthy"
+		} else {
+			healthState = "unhealthy"
+		}
+	}
+
+	return writeString(
+		stdout,
+		fmt.Sprintf(
+			"Container: %s\nStatus: %s\nImage: %s\nURL: %s\nHealth: %s\n",
+			container,
+			containerState,
+			image,
+			url,
+			healthState,
+		),
+		"status output",
+	)
 }
 
 func runLogs(
