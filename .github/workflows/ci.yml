@@ -35,3 +35,6 @@ jobs:
 
       - name: Build hello-api image
         run: docker build --file examples/hello-api/Dockerfile --tag hello-api:ci .
+permissions:
+  contents: read
+  packages: write
