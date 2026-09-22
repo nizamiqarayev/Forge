@@ -179,6 +179,77 @@ func TestRunDeploy(t *testing.T) {
 		}
 	})
 
+	t.Run("pulls and starts a published image", func(t *testing.T) {
+		const imageRef = "ghcr.io/example/hello-api:abc123"
+
+		docker := &fakeDockerRunner{}
+		health := &fakeHealthChecker{}
+
+		stdout, _, err := invokeWithHealth(
+			t,
+			docker,
+			health,
+			"deploy",
+			"--port", "18080",
+			"--image", imageRef,
+			"hello-api",
+		)
+		if err != nil {
+			t.Fatalf("deploy error = %v", err)
+		}
+		if strings.Contains(stdout, "Building") {
+			t.Errorf("stdout = %q, must not build a supplied image", stdout)
+		}
+
+		wantCalls := []dockerCall{
+			checkCall,
+			{
+				method: "Run",
+				args:   []string{"pull", imageRef},
+			},
+			{
+				method: "Run",
+				args: []string{
+					"run", "--detach",
+					"--name", "forge-hello-api",
+					"--label", "forge.managed=true",
+					"--label", "forge.app=hello-api",
+					"--label", "forge.host-port=18080",
+					"--publish", "18080:8080",
+					imageRef,
+				},
+			},
+		}
+		if !reflect.DeepEqual(docker.calls, wantCalls) {
+			t.Errorf("Docker calls = %#v, want %#v", docker.calls, wantCalls)
+		}
+	})
+
+	t.Run("returns a pull failure", func(t *testing.T) {
+		const imageRef = "ghcr.io/example/hello-api:abc123"
+
+		docker := &fakeDockerRunner{runErrors: []error{errors.New("pull failed")}}
+		stdout, _, err := invoke(
+			t,
+			docker,
+			"deploy", "--image", imageRef, "hello-api",
+		)
+		if err == nil || !strings.Contains(err.Error(), "pull hello-api image") {
+			t.Fatalf("error = %v, want wrapped pull error", err)
+		}
+		if stdout != "Pulling "+imageRef+"...\n" {
+			t.Errorf("stdout = %q, want only pull-start message", stdout)
+		}
+
+		wantCalls := []dockerCall{
+			checkCall,
+			{method: "Run", args: []string{"pull", imageRef}},
+		}
+		if !reflect.DeepEqual(docker.calls, wantCalls) {
+			t.Errorf("Docker calls = %#v, want %#v", docker.calls, wantCalls)
+		}
+	})
+
 	t.Run("returns an unhealthy deployment", func(t *testing.T) {
 		docker := &fakeDockerRunner{}
 		health := &fakeHealthChecker{err: errors.New("health timeout")}
@@ -254,15 +325,15 @@ func TestLifecycleCommands(t *testing.T) {
 		{
 			name:       "status",
 			args:       []string{"status", "hello-api"},
-			docker:     &fakeDockerRunner{output: "running|18080\n"},
+			docker:     &fakeDockerRunner{output: "running|18080|ghcr.io/example/hello-api:abc123\n"},
 			health:     &fakeHealthChecker{},
-			wantOutput: "Container: forge-hello-api\nStatus: running\nImage: hello-api:local\nURL: http://localhost:18080\nHealth: healthy\n",
+			wantOutput: "Container: forge-hello-api\nStatus: running\nImage: ghcr.io/example/hello-api:abc123\nURL: http://localhost:18080\nHealth: healthy\n",
 			wantURLs:   []string{"http://127.0.0.1:18080/healthz"},
 			wantCalls: []dockerCall{{
 				method: "Output",
 				args: []string{
 					"container", "inspect",
-					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}`,
+					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}`,
 					"forge-hello-api",
 				},
 			}},
@@ -270,14 +341,14 @@ func TestLifecycleCommands(t *testing.T) {
 		{
 			name:       "stopped status",
 			args:       []string{"status", "hello-api"},
-			docker:     &fakeDockerRunner{output: "exited|18080\n"},
+			docker:     &fakeDockerRunner{output: "exited|18080|hello-api:local\n"},
 			health:     &fakeHealthChecker{},
 			wantOutput: "Container: forge-hello-api\nStatus: exited\nImage: hello-api:local\nURL: http://localhost:18080\nHealth: unavailable\n",
 			wantCalls: []dockerCall{{
 				method: "Output",
 				args: []string{
 					"container", "inspect",
-					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}`,
+					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}`,
 					"forge-hello-api",
 				},
 			}},

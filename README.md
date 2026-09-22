@@ -72,6 +72,15 @@ Milestone 2 makes deployment health-aware. Forge waits for `/healthz` before
 reporting success, times out failed starts, preserves failed containers for
 inspection, and includes application health in `forge status`.
 
+Milestone 3 adds continuous integration through GitHub Actions. Pushes to
+`main` and pull requests verify formatting, tests, static analysis, the Forge
+CLI build, the `hello-api` image build, and a live container health check.
+
+Milestone 4 publishes successful `main` builds to GitHub Container Registry.
+Each image is tagged with its Git commit SHA and supports both `linux/amd64`
+and `linux/arm64`. Forge can pull and deploy that exact artifact instead of
+rebuilding source on the deployment machine.
+
 ## Forge CLI
 
 Build the CLI:
@@ -92,6 +101,19 @@ Choose another host port when needed:
 ./bin/forge deploy --port 18080 hello-api
 ```
 
+Deploy an immutable image previously published by CI:
+
+```sh
+./bin/forge deploy \
+  --port 18080 \
+  --image ghcr.io/nizamiqarayev/forge-hello-api:<commit-sha> \
+  hello-api
+```
+
+Without `--image`, Forge builds `hello-api:local` from the current checkout.
+With `--image`, Forge pulls the supplied image and deploys it without a local
+rebuild.
+
 Operate the deployed workload:
 
 ```sh
@@ -105,7 +127,27 @@ Forge names the container `forge-hello-api` and labels it with
 `forge.managed=true` and `forge.app=hello-api`. Deploy refuses to replace an
 existing container; stop and delete it explicitly before deploying again. A
 deployment is successful only after the workload returns HTTP 200 from
-`/healthz` within 15 seconds.
+`/healthz` within 15 seconds. `forge status` reports the exact image reference
+stored in the running container.
+
+## Continuous Integration and Images
+
+The workflow in `.github/workflows/ci.yml` runs on pull requests and pushes to
+`main`. Pull requests perform verification only. A successful `main` run also
+publishes:
+
+```text
+ghcr.io/nizamiqarayev/forge-hello-api:<commit-sha>
+```
+
+The commit tag is immutable deployment input: it connects a running container
+to the exact source revision that produced it. The registry tag points to a
+multi-platform manifest, allowing Docker to select AMD64 on common Linux
+servers or ARM64 on Apple Silicon automatically.
+
+`hello-api` remains Forge's controlled integration workload while the platform
+is being built and tested. Once repository-driven deployments are supported,
+Malcore will be the first real external project operated through Forge.
 
 ## Run the Service
 

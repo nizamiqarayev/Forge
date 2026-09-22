@@ -33,7 +33,8 @@ Available commands:
   help    Show this help message
 
 Deploy options:
-  --port  Host port to publish (default 8080)
+  --port PORT    Host port to publish (default 8080)
+  --image IMAGE  Pull and deploy an existing container image
 `
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -88,6 +89,7 @@ func runDeploy(
 	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	port := flags.Int("port", 8080, "host port to publish")
+	imageRef := flags.String("image", "", "existing container image to deploy")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("parse deploy options: %w", err)
 	}
@@ -114,22 +116,41 @@ func runDeploy(
 		return fmt.Errorf("%s is already deployed; stop and delete it before deploying again", app)
 	}
 
-	if err := writeString(stdout, "Building "+app+" image...\n", "deploy output"); err != nil {
-		return err
-	}
-	if err := docker.Run(
-		ctx,
-		stdout,
-		stderr,
-		"build",
-		"--file", dockerfile,
-		"--tag", image,
-		".",
-	); err != nil {
-		return fmt.Errorf("build %s image: %w", app, err)
+	selectedImage := strings.TrimSpace(*imageRef)
+	if selectedImage == "" {
+		selectedImage = image
+
+		if err := writeString(stdout, "Building "+app+" image...\n", "deploy output"); err != nil {
+			return err
+		}
+		if err := docker.Run(
+			ctx,
+			stdout,
+			stderr,
+			"build",
+			"--file", dockerfile,
+			"--tag", selectedImage,
+			".",
+		); err != nil {
+			return fmt.Errorf("build %s image: %w", app, err)
+		}
+
+		if err := writeString(stdout, "Built "+selectedImage+"\n", "deploy output"); err != nil {
+			return err
+		}
+	} else {
+		if err := writeString(stdout, "Pulling "+selectedImage+"...\n", "deploy output"); err != nil {
+			return err
+		}
+		if err := docker.Run(ctx, stdout, stderr, "pull", selectedImage); err != nil {
+			return fmt.Errorf("pull %s image: %w", app, err)
+		}
+		if err := writeString(stdout, "Pulled "+selectedImage+"\n", "deploy output"); err != nil {
+			return err
+		}
 	}
 
-	if err := writeString(stdout, "Built "+image+"\nStarting "+app+"...\n", "deploy output"); err != nil {
+	if err := writeString(stdout, "Starting "+app+"...\n", "deploy output"); err != nil {
 		return err
 	}
 	if err := docker.Run(
@@ -143,7 +164,7 @@ func runDeploy(
 		"--label", "forge.app="+app,
 		"--label", "forge.host-port="+strconv.Itoa(*port),
 		"--publish", strconv.Itoa(*port)+":8080",
-		image,
+		selectedImage,
 	); err != nil {
 		return fmt.Errorf("start %s container: %w", app, err)
 	}
@@ -180,18 +201,18 @@ func runStatus(
 	state, err := docker.Output(
 		ctx,
 		"container", "inspect",
-		"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}`,
+		"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}`,
 		container,
 	)
 	if err != nil {
 		return fmt.Errorf("inspect %s deployment: %w", app, err)
 	}
 
-	parts := strings.SplitN(strings.TrimSpace(state), "|", 2)
-	if len(parts) != 2 {
+	parts := strings.SplitN(strings.TrimSpace(state), "|", 3)
+	if len(parts) != 3 {
 		return fmt.Errorf("inspect %s deployment: unexpected Docker output %q", app, state)
 	}
-	containerState, hostPort := parts[0], parts[1]
+	containerState, hostPort, deployedImage := parts[0], parts[1], parts[2]
 	healthState := "unavailable"
 	url := "-"
 	if hostPort != "" {
@@ -214,7 +235,7 @@ func runStatus(
 			"Container: %s\nStatus: %s\nImage: %s\nURL: %s\nHealth: %s\n",
 			container,
 			containerState,
-			image,
+			deployedImage,
 			url,
 			healthState,
 		),
