@@ -1,2 +1,5 @@
 # Local build output
 /bin/
+
+# Forge-managed repository checkouts
+/.forge/

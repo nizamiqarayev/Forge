@@ -81,10 +81,10 @@ Each image is tagged with its Git commit SHA and supports both `linux/amd64`
 and `linux/arm64`. Forge can pull and deploy that exact artifact instead of
 rebuilding source on the deployment machine.
 
-Milestone 5 introduces application manifests. Deployment settings belong to
-the application in `forge.json`, allowing Forge to operate an application path
-without embedding its name, container port, health endpoint, or Dockerfile in
-the CLI.
+Milestone 5 introduces repository-driven deployment planning. Forge can infer a
+single-container application from a root `Dockerfile` or deploy a repository
+with exactly one Docker Compose file. An optional `forge.json` overrides the
+single-container defaults when the repository needs explicit settings.
 
 ## Forge CLI
 
@@ -98,6 +98,26 @@ Deploy the example workload on the default host port `8080`:
 
 ```sh
 ./bin/forge deploy ./examples/hello-api
+```
+
+Deploy a remote Git repository:
+
+```sh
+./bin/forge deploy https://github.com/nizamiqarayev/Malcore.git
+```
+
+Forge clones the repository into `.forge/repositories` under the current Forge
+working directory, resolves the checked-out commit SHA, detects its deployment
+driver, and deploys that immutable checkout. The `.forge` directory is ignored
+by Git. Successful remote deployments print their source URL and revision.
+Single-container deployments also store both values as Docker labels.
+
+Choose a different managed workspace when needed:
+
+```sh
+./bin/forge deploy \
+  --workspace /path/to/forge-data \
+  https://github.com/nizamiqarayev/Malcore.git
 ```
 
 Choose another host port when needed:
@@ -128,6 +148,20 @@ Operate the deployed workload:
 ./bin/forge delete hello-api
 ```
 
+The same lifecycle commands work for Compose applications:
+
+```sh
+./bin/forge status malcore
+./bin/forge logs malcore
+./bin/forge stop malcore
+./bin/forge delete malcore
+```
+
+Forge discovers Compose deployments through Docker's project labels and recovers
+the exact Compose file paths automatically. `stop` preserves the containers;
+`delete` removes the Compose containers and network while retaining named data
+volumes.
+
 Forge names the container `forge-hello-api` and labels it with
 `forge.managed=true` and `forge.app=hello-api`. Deploy refuses to replace an
 existing container; stop and delete it explicitly before deploying again. A
@@ -151,12 +185,26 @@ multi-platform manifest, allowing Docker to select AMD64 on common Linux
 servers or ARM64 on Apple Silicon automatically.
 
 `hello-api` remains Forge's controlled integration workload while the platform
-is being built and tested. Once repository-driven deployments are supported,
-Malcore will be the first real external project operated through Forge.
+is being built and tested. Malcore is the first real external project operated
+through Forge's repository-driven Compose deployment path.
 
-## Application Manifest
+## Repository Detection
 
-An application directory declares its operational settings in `forge.json`:
+`forge deploy` resolves an application directory in this order:
+
+1. Use `forge.json` when it exists.
+2. Otherwise, detect exactly one standard Compose file anywhere in the repository.
+3. Otherwise, use a root `Dockerfile` with safe single-container defaults.
+
+Multiple Compose files are treated as ambiguous instead of guessing. For a
+Compose repository, Forge assigns a stable `forge-<application>` project name
+and runs `docker compose up --detach --build --wait`. Docker Compose owns its
+service images, published ports, networks, volumes, and health checks, so Forge
+rejects the single-container `--image` and `--port` options for this driver.
+
+For a root `Dockerfile`, Forge derives the application name from the directory
+and defaults to container port `8080` and health path `/healthz`. Applications
+that need different values can add the optional `forge.json` override:
 
 ```json
 {
@@ -167,11 +215,14 @@ An application directory declares its operational settings in `forge.json`:
 }
 ```
 
-`forge deploy` reads and validates this file before contacting Docker. The
-application name determines the managed container and local image names. The
-container port, health path, Dockerfile, and build context come from the
-application directory rather than Forge constants. Lifecycle commands continue
-to use the application name, for example `forge status hello-api`.
+When present, Forge validates this file before contacting Docker. The application
+name determines the managed container and local image names. Lifecycle commands
+continue to use that resolved name, for example `forge status hello-api`.
+
+For Compose applications, lifecycle commands find every project container using
+the `com.docker.compose.project` label. They recover the original configuration
+path from `com.docker.compose.project.config_files`, so users only provide the
+application name after deployment.
 
 ## Run the Service
 
