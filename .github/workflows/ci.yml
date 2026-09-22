@@ -38,6 +38,25 @@ jobs:
       - name: Build hello-api image
         run: docker build --file examples/hello-api/Dockerfile --tag hello-api:ci .
 
+      - name: Smoke-test hello-api image
+        run: |
+          docker run --detach \
+            --name hello-api-ci \
+            --publish 127.0.0.1:18080:8080 \
+            hello-api:ci
+
+          trap 'docker rm --force hello-api-ci >/dev/null 2>&1 || true' EXIT
+
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18080/healthz; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs hello-api-ci
+          exit 1
+
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin     
