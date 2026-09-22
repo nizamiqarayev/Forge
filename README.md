@@ -81,6 +81,11 @@ Each image is tagged with its Git commit SHA and supports both `linux/amd64`
 and `linux/arm64`. Forge can pull and deploy that exact artifact instead of
 rebuilding source on the deployment machine.
 
+Milestone 5 introduces application manifests. Deployment settings belong to
+the application in `forge.json`, allowing Forge to operate an application path
+without embedding its name, container port, health endpoint, or Dockerfile in
+the CLI.
+
 ## Forge CLI
 
 Build the CLI:
@@ -92,13 +97,13 @@ go build -o bin/forge ./cmd/forge
 Deploy the example workload on the default host port `8080`:
 
 ```sh
-./bin/forge deploy hello-api
+./bin/forge deploy ./examples/hello-api
 ```
 
 Choose another host port when needed:
 
 ```sh
-./bin/forge deploy --port 18080 hello-api
+./bin/forge deploy --port 18080 ./examples/hello-api
 ```
 
 Deploy an immutable image previously published by CI:
@@ -107,7 +112,7 @@ Deploy an immutable image previously published by CI:
 ./bin/forge deploy \
   --port 18080 \
   --image ghcr.io/nizamiqarayev/forge-hello-api:<commit-sha> \
-  hello-api
+  ./examples/hello-api
 ```
 
 Without `--image`, Forge builds `hello-api:local` from the current checkout.
@@ -149,6 +154,25 @@ servers or ARM64 on Apple Silicon automatically.
 is being built and tested. Once repository-driven deployments are supported,
 Malcore will be the first real external project operated through Forge.
 
+## Application Manifest
+
+An application directory declares its operational settings in `forge.json`:
+
+```json
+{
+  "name": "hello-api",
+  "containerPort": 8080,
+  "healthPath": "/healthz",
+  "dockerfile": "Dockerfile"
+}
+```
+
+`forge deploy` reads and validates this file before contacting Docker. The
+application name determines the managed container and local image names. The
+container port, health path, Dockerfile, and build context come from the
+application directory rather than Forge constants. Lifecycle commands continue
+to use the application name, for example `forge status hello-api`.
+
 ## Run the Service
 
 Run directly from source:
@@ -189,7 +213,7 @@ Build the image:
 docker build \
   -f examples/hello-api/Dockerfile \
   -t hello-api:local \
-  .
+  examples/hello-api
 ```
 
 Run the workload in the foreground and publish its HTTP port to the Mac:

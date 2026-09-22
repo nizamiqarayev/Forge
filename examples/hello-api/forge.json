@@ -1,0 +1,6 @@
+{
+  "name": "hello-api",
+  "containerPort": 8080,
+  "healthPath": "/healthz",
+  "dockerfile": "Dockerfile"
+}

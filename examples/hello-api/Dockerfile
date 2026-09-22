@@ -4,12 +4,8 @@ FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 
-# Copy the module definition separately so dependency downloads can be cached.
-COPY go.mod ./
-RUN go mod download
-
-COPY examples/hello-api ./examples/hello-api
-RUN CGO_ENABLED=0 go build -o /out/hello-api ./examples/hello-api
+COPY *.go ./
+RUN CGO_ENABLED=0 go build -o /out/hello-api main.go
 
 FROM debian:bookworm-slim AS runtime
 

@@ -28,6 +28,26 @@ type fakeHealthChecker struct {
 	err  error
 }
 
+type fakeApplicationManifestLoader struct {
+	manifest applicationManifest
+	err      error
+	paths    []string
+}
+
+func (f *fakeApplicationManifestLoader) Load(applicationPath string) (applicationManifest, error) {
+	f.paths = append(f.paths, applicationPath)
+	return f.manifest, f.err
+}
+
+var helloAPIManifest = applicationManifest{
+	Name:          "hello-api",
+	ContainerPort: 8080,
+	HealthPath:    "/healthz",
+	Dockerfile:    "Dockerfile",
+}
+
+const helloAPIPath = "examples/hello-api"
+
 func (f *fakeHealthChecker) Wait(_ context.Context, url string) error {
 	f.urls = append(f.urls, url)
 	return f.err
@@ -60,6 +80,7 @@ func (f *fakeDockerRunner) record(method string, args []string) {
 
 var _ dockerRunner = (*fakeDockerRunner)(nil)
 var _ healthChecker = (*fakeHealthChecker)(nil)
+var _ applicationManifestLoader = (*fakeApplicationManifestLoader)(nil)
 
 func TestRunShowsHelp(t *testing.T) {
 	for _, tt := range []struct {
@@ -82,6 +103,7 @@ func TestRunShowsHelp(t *testing.T) {
 				&stderr,
 				&fakeDockerRunner{},
 				&fakeHealthChecker{},
+				&fakeApplicationManifestLoader{manifest: helloAPIManifest},
 			)
 			if err != nil {
 				t.Fatalf("runWithDocker() error = %v", err)
@@ -107,6 +129,7 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 		&stderr,
 		&fakeDockerRunner{},
 		&fakeHealthChecker{},
+		&fakeApplicationManifestLoader{manifest: helloAPIManifest},
 	)
 	if err == nil || !strings.Contains(err.Error(), `unknown command "launch"`) {
 		t.Fatalf("error = %v, want unknown-command error", err)
@@ -126,7 +149,7 @@ func TestRunDeploy(t *testing.T) {
 	buildCall := dockerCall{
 		method: "Run",
 		args: []string{
-			"build", "--file", "examples/hello-api/Dockerfile", "--tag", "hello-api:local", ".",
+			"build", "--file", "examples/hello-api/Dockerfile", "--tag", "hello-api:local", helloAPIPath,
 		},
 	}
 	runCall := dockerCall{
@@ -137,6 +160,7 @@ func TestRunDeploy(t *testing.T) {
 			"--label", "forge.managed=true",
 			"--label", "forge.app=hello-api",
 			"--label", "forge.host-port=18080",
+			"--label", "forge.health-path=/healthz",
 			"--publish", "18080:8080",
 			"hello-api:local",
 		},
@@ -149,7 +173,7 @@ func TestRunDeploy(t *testing.T) {
 			t,
 			docker,
 			health,
-			"deploy", "--port", "18080", "hello-api",
+			"deploy", "--port", "18080", helloAPIPath,
 		)
 		if err != nil {
 			t.Fatalf("deploy error = %v", err)
@@ -192,7 +216,7 @@ func TestRunDeploy(t *testing.T) {
 			"deploy",
 			"--port", "18080",
 			"--image", imageRef,
-			"hello-api",
+			helloAPIPath,
 		)
 		if err != nil {
 			t.Fatalf("deploy error = %v", err)
@@ -215,6 +239,7 @@ func TestRunDeploy(t *testing.T) {
 					"--label", "forge.managed=true",
 					"--label", "forge.app=hello-api",
 					"--label", "forge.host-port=18080",
+					"--label", "forge.health-path=/healthz",
 					"--publish", "18080:8080",
 					imageRef,
 				},
@@ -232,7 +257,7 @@ func TestRunDeploy(t *testing.T) {
 		stdout, _, err := invoke(
 			t,
 			docker,
-			"deploy", "--image", imageRef, "hello-api",
+			"deploy", "--image", imageRef, helloAPIPath,
 		)
 		if err == nil || !strings.Contains(err.Error(), "pull hello-api image") {
 			t.Fatalf("error = %v, want wrapped pull error", err)
@@ -253,7 +278,7 @@ func TestRunDeploy(t *testing.T) {
 	t.Run("returns an unhealthy deployment", func(t *testing.T) {
 		docker := &fakeDockerRunner{}
 		health := &fakeHealthChecker{err: errors.New("health timeout")}
-		stdout, _, err := invokeWithHealth(t, docker, health, "deploy", "hello-api")
+		stdout, _, err := invokeWithHealth(t, docker, health, "deploy", helloAPIPath)
 		if err == nil || !strings.Contains(err.Error(), "wait for hello-api health") {
 			t.Fatalf("error = %v, want wrapped health error", err)
 		}
@@ -267,7 +292,7 @@ func TestRunDeploy(t *testing.T) {
 
 	t.Run("rejects an existing deployment", func(t *testing.T) {
 		docker := &fakeDockerRunner{output: "container-id\n"}
-		_, _, err := invoke(t, docker, "deploy", "hello-api")
+		_, _, err := invoke(t, docker, "deploy", helloAPIPath)
 		if err == nil || !strings.Contains(err.Error(), "already deployed") {
 			t.Fatalf("error = %v, want existing-deployment error", err)
 		}
@@ -278,7 +303,7 @@ func TestRunDeploy(t *testing.T) {
 
 	t.Run("returns a build failure", func(t *testing.T) {
 		docker := &fakeDockerRunner{runErrors: []error{errors.New("build failed")}}
-		stdout, _, err := invoke(t, docker, "deploy", "hello-api")
+		stdout, _, err := invoke(t, docker, "deploy", helloAPIPath)
 		if err == nil || !strings.Contains(err.Error(), "build hello-api image") {
 			t.Fatalf("error = %v, want wrapped build error", err)
 		}
@@ -290,14 +315,39 @@ func TestRunDeploy(t *testing.T) {
 		}
 	})
 
+	t.Run("returns a manifest failure before Docker", func(t *testing.T) {
+		docker := &fakeDockerRunner{}
+		loader := &fakeApplicationManifestLoader{err: errors.New("invalid manifest")}
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		err := runWithDependencies(
+			context.Background(),
+			[]string{"deploy", helloAPIPath},
+			&stdout,
+			&stderr,
+			docker,
+			&fakeHealthChecker{},
+			loader,
+		)
+		if err == nil || !strings.Contains(err.Error(), "load application") {
+			t.Fatalf("error = %v, want wrapped manifest error", err)
+		}
+		if !reflect.DeepEqual(loader.paths, []string{helloAPIPath}) {
+			t.Errorf("manifest paths = %#v, want %#v", loader.paths, []string{helloAPIPath})
+		}
+		if len(docker.calls) != 0 {
+			t.Errorf("Docker calls = %#v, want none", docker.calls)
+		}
+	})
+
 	for _, tt := range []struct {
 		name      string
 		args      []string
 		wantError string
 	}{
 		{name: "missing application", args: []string{"deploy"}, wantError: "expects exactly one"},
-		{name: "unsupported application", args: []string{"deploy", "payments"}, wantError: "unsupported app"},
-		{name: "invalid port", args: []string{"deploy", "--port", "0", "hello-api"}, wantError: "port must be"},
+		{name: "invalid port", args: []string{"deploy", "--port", "0", helloAPIPath}, wantError: "port must be"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			docker := &fakeDockerRunner{}
@@ -325,7 +375,7 @@ func TestLifecycleCommands(t *testing.T) {
 		{
 			name:       "status",
 			args:       []string{"status", "hello-api"},
-			docker:     &fakeDockerRunner{output: "running|18080|ghcr.io/example/hello-api:abc123\n"},
+			docker:     &fakeDockerRunner{output: "running|18080|ghcr.io/example/hello-api:abc123|/healthz\n"},
 			health:     &fakeHealthChecker{},
 			wantOutput: "Container: forge-hello-api\nStatus: running\nImage: ghcr.io/example/hello-api:abc123\nURL: http://localhost:18080\nHealth: healthy\n",
 			wantURLs:   []string{"http://127.0.0.1:18080/healthz"},
@@ -333,7 +383,7 @@ func TestLifecycleCommands(t *testing.T) {
 				method: "Output",
 				args: []string{
 					"container", "inspect",
-					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}`,
+					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}|{{index .Config.Labels "forge.health-path"}}`,
 					"forge-hello-api",
 				},
 			}},
@@ -341,14 +391,14 @@ func TestLifecycleCommands(t *testing.T) {
 		{
 			name:       "stopped status",
 			args:       []string{"status", "hello-api"},
-			docker:     &fakeDockerRunner{output: "exited|18080|hello-api:local\n"},
+			docker:     &fakeDockerRunner{output: "exited|18080|hello-api:local|/healthz\n"},
 			health:     &fakeHealthChecker{},
 			wantOutput: "Container: forge-hello-api\nStatus: exited\nImage: hello-api:local\nURL: http://localhost:18080\nHealth: unavailable\n",
 			wantCalls: []dockerCall{{
 				method: "Output",
 				args: []string{
 					"container", "inspect",
-					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}`,
+					"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}|{{index .Config.Labels "forge.health-path"}}`,
 					"forge-hello-api",
 				},
 			}},
@@ -420,6 +470,14 @@ func invokeWithHealth(
 	t.Helper()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	err := runWithDependencies(context.Background(), args, &stdout, &stderr, docker, health)
+	err := runWithDependencies(
+		context.Background(),
+		args,
+		&stdout,
+		&stderr,
+		docker,
+		health,
+		&fakeApplicationManifestLoader{manifest: helloAPIManifest},
+	)
 	return stdout.String(), stderr.String(), err
 }

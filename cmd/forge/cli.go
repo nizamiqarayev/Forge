@@ -5,24 +5,19 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const (
-	supportedApp = "hello-api"
-	container    = "forge-hello-api"
-	image        = "hello-api:local"
-	dockerfile   = "examples/hello-api/Dockerfile"
-	healthPath   = "/healthz"
-	healthWait   = 15 * time.Second
-)
+const healthWait = 15 * time.Second
 
 const usage = `Forge operates local application workloads.
 
 Usage:
-  forge <command> [options] <application>
+  forge deploy [options] <application-path>
+  forge <status|logs|stop|delete> <application-name>
 
 Available commands:
   deploy  Build and start an application
@@ -45,6 +40,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		stderr,
 		execDockerRunner{},
 		newHTTPHealthChecker(),
+		fileApplicationManifestLoader{},
 	)
 }
 
@@ -55,6 +51,7 @@ func runWithDependencies(
 	stderr io.Writer,
 	docker dockerRunner,
 	health healthChecker,
+	manifests applicationManifestLoader,
 ) error {
 	if len(args) == 0 {
 		return writeUsage(stdout)
@@ -64,7 +61,7 @@ func runWithDependencies(
 	case "help", "-h", "--help":
 		return writeUsage(stdout)
 	case "deploy":
-		return runDeploy(ctx, args[1:], stdout, stderr, docker, health)
+		return runDeploy(ctx, args[1:], stdout, stderr, docker, health, manifests)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, docker, health)
 	case "logs":
@@ -85,6 +82,7 @@ func runDeploy(
 	stderr io.Writer,
 	docker dockerRunner,
 	health healthChecker,
+	manifests applicationManifestLoader,
 ) error {
 	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -94,13 +92,22 @@ func runDeploy(
 		return fmt.Errorf("parse deploy options: %w", err)
 	}
 
-	app, err := validateAppArgs("deploy", flags.Args())
+	applicationPath, err := validateApplicationPathArgs(flags.Args())
 	if err != nil {
 		return err
 	}
 	if *port < 1 || *port > 65535 {
 		return fmt.Errorf("deploy port must be between 1 and 65535")
 	}
+
+	manifest, err := manifests.Load(applicationPath)
+	if err != nil {
+		return fmt.Errorf("load application: %w", err)
+	}
+	app := manifest.Name
+	container := containerName(app)
+	localImage := app + ":local"
+	dockerfile := filepath.Join(applicationPath, manifest.Dockerfile)
 
 	existing, err := docker.Output(
 		ctx,
@@ -118,7 +125,7 @@ func runDeploy(
 
 	selectedImage := strings.TrimSpace(*imageRef)
 	if selectedImage == "" {
-		selectedImage = image
+		selectedImage = localImage
 
 		if err := writeString(stdout, "Building "+app+" image...\n", "deploy output"); err != nil {
 			return err
@@ -130,7 +137,7 @@ func runDeploy(
 			"build",
 			"--file", dockerfile,
 			"--tag", selectedImage,
-			".",
+			applicationPath,
 		); err != nil {
 			return fmt.Errorf("build %s image: %w", app, err)
 		}
@@ -163,13 +170,14 @@ func runDeploy(
 		"--label", "forge.managed=true",
 		"--label", "forge.app="+app,
 		"--label", "forge.host-port="+strconv.Itoa(*port),
-		"--publish", strconv.Itoa(*port)+":8080",
+		"--label", "forge.health-path="+manifest.HealthPath,
+		"--publish", strconv.Itoa(*port)+":"+strconv.Itoa(manifest.ContainerPort),
 		selectedImage,
 	); err != nil {
 		return fmt.Errorf("start %s container: %w", app, err)
 	}
 
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", *port, healthPath)
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", *port, manifest.HealthPath)
 	if err := writeString(stdout, "Waiting for "+app+" health...\n", "deploy output"); err != nil {
 		return err
 	}
@@ -198,27 +206,28 @@ func runStatus(
 		return err
 	}
 
+	container := containerName(app)
 	state, err := docker.Output(
 		ctx,
 		"container", "inspect",
-		"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}`,
+		"--format", `{{.State.Status}}|{{index .Config.Labels "forge.host-port"}}|{{.Config.Image}}|{{index .Config.Labels "forge.health-path"}}`,
 		container,
 	)
 	if err != nil {
 		return fmt.Errorf("inspect %s deployment: %w", app, err)
 	}
 
-	parts := strings.SplitN(strings.TrimSpace(state), "|", 3)
-	if len(parts) != 3 {
+	parts := strings.SplitN(strings.TrimSpace(state), "|", 4)
+	if len(parts) != 4 {
 		return fmt.Errorf("inspect %s deployment: unexpected Docker output %q", app, state)
 	}
-	containerState, hostPort, deployedImage := parts[0], parts[1], parts[2]
+	containerState, hostPort, deployedImage, healthPath := parts[0], parts[1], parts[2], parts[3]
 	healthState := "unavailable"
 	url := "-"
 	if hostPort != "" {
 		url = "http://localhost:" + hostPort
 	}
-	if containerState == "running" && hostPort != "" {
+	if containerState == "running" && hostPort != "" && healthPath != "" {
 		healthCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err := health.Wait(healthCtx, "http://127.0.0.1:"+hostPort+healthPath)
 		cancel()
@@ -254,7 +263,7 @@ func runLogs(
 	if err != nil {
 		return err
 	}
-	if err := docker.Run(ctx, stdout, stderr, "logs", container); err != nil {
+	if err := docker.Run(ctx, stdout, stderr, "logs", containerName(app)); err != nil {
 		return fmt.Errorf("read %s logs: %w", app, err)
 	}
 	return nil
@@ -271,7 +280,7 @@ func runStop(
 	if err != nil {
 		return err
 	}
-	if err := docker.Run(ctx, stdout, stderr, "stop", "--timeout", "10", container); err != nil {
+	if err := docker.Run(ctx, stdout, stderr, "stop", "--timeout", "10", containerName(app)); err != nil {
 		return fmt.Errorf("stop %s: %w", app, err)
 	}
 	return writeString(stdout, "Stopped "+app+"\n", "stop output")
@@ -288,7 +297,7 @@ func runDelete(
 	if err != nil {
 		return err
 	}
-	if err := docker.Run(ctx, stdout, stderr, "container", "rm", container); err != nil {
+	if err := docker.Run(ctx, stdout, stderr, "container", "rm", containerName(app)); err != nil {
 		return fmt.Errorf("delete %s: %w", app, err)
 	}
 	return writeString(stdout, "Deleted "+app+" container\n", "delete output")
@@ -298,10 +307,26 @@ func validateAppArgs(command string, args []string) (string, error) {
 	if len(args) != 1 {
 		return "", fmt.Errorf("%s expects exactly one app name", command)
 	}
-	if args[0] != supportedApp {
-		return "", fmt.Errorf("unsupported app %q; only %q is supported", args[0], supportedApp)
+	app := strings.TrimSpace(args[0])
+	if !applicationNamePattern.MatchString(app) {
+		return "", fmt.Errorf("invalid app name %q", args[0])
 	}
-	return args[0], nil
+	return app, nil
+}
+
+func validateApplicationPathArgs(args []string) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("deploy expects exactly one application path")
+	}
+	applicationPath := strings.TrimSpace(args[0])
+	if applicationPath == "" {
+		return "", fmt.Errorf("deploy application path must not be empty")
+	}
+	return filepath.Clean(applicationPath), nil
+}
+
+func containerName(app string) string {
+	return "forge-" + app
 }
 
 func writeUsage(w io.Writer) error {
