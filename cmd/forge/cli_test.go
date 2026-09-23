@@ -38,6 +38,18 @@ type fakeDeploymentPlanResolver struct {
 	workspaces []string
 }
 
+type fakeDeploymentRecordStore struct {
+	workspaces []string
+	records    []deploymentRecord
+	err        error
+}
+
+func (f *fakeDeploymentRecordStore) Save(workspace string, record deploymentRecord) error {
+	f.workspaces = append(f.workspaces, workspace)
+	f.records = append(f.records, record)
+	return f.err
+}
+
 func (f *fakeDeploymentPlanResolver) Resolve(_ context.Context, source, workspace string) (deploymentPlan, error) {
 	f.paths = append(f.paths, source)
 	f.workspaces = append(f.workspaces, workspace)
@@ -100,6 +112,7 @@ func (f *fakeDockerRunner) record(method string, args []string) {
 var _ dockerRunner = (*fakeDockerRunner)(nil)
 var _ healthChecker = (*fakeHealthChecker)(nil)
 var _ deploymentPlanResolver = (*fakeDeploymentPlanResolver)(nil)
+var _ deploymentRecordStore = (*fakeDeploymentRecordStore)(nil)
 
 func TestRunShowsHelp(t *testing.T) {
 	for _, tt := range []struct {
@@ -123,6 +136,7 @@ func TestRunShowsHelp(t *testing.T) {
 				&fakeDockerRunner{},
 				&fakeHealthChecker{},
 				&fakeDeploymentPlanResolver{plan: helloAPIPlan},
+				&fakeDeploymentRecordStore{},
 			)
 			if err != nil {
 				t.Fatalf("runWithDocker() error = %v", err)
@@ -149,6 +163,7 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 		&fakeDockerRunner{},
 		&fakeHealthChecker{},
 		&fakeDeploymentPlanResolver{plan: helloAPIPlan},
+		&fakeDeploymentRecordStore{},
 	)
 	if err == nil || !strings.Contains(err.Error(), `unknown command "launch"`) {
 		t.Fatalf("error = %v, want unknown-command error", err)
@@ -276,6 +291,7 @@ func TestRunDeploy(t *testing.T) {
 		plan.Revision = testRevision
 		docker := &fakeDockerRunner{}
 		health := &fakeHealthChecker{}
+		records := &fakeDeploymentRecordStore{}
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
 
@@ -287,6 +303,7 @@ func TestRunDeploy(t *testing.T) {
 			docker,
 			health,
 			&fakeDeploymentPlanResolver{plan: plan},
+			records,
 		)
 		if err != nil {
 			t.Fatalf("deploy error = %v", err)
@@ -307,6 +324,9 @@ func TestRunDeploy(t *testing.T) {
 		}
 		if !containsAdjacentArguments(startCall.args, "--label", "forge.revision="+testRevision) {
 			t.Errorf("start arguments = %#v, want revision label", startCall.args)
+		}
+		if len(records.records) != 1 || records.records[0].Revision != testRevision {
+			t.Errorf("deployment records = %#v, want remote revision", records.records)
 		}
 	})
 
@@ -389,6 +409,7 @@ func TestRunDeploy(t *testing.T) {
 			docker,
 			&fakeHealthChecker{},
 			resolver,
+			&fakeDeploymentRecordStore{},
 		)
 		if err == nil || !strings.Contains(err.Error(), "resolve application") {
 			t.Fatalf("error = %v, want wrapped resolution error", err)
@@ -403,6 +424,7 @@ func TestRunDeploy(t *testing.T) {
 
 	t.Run("builds and starts a Compose repository", func(t *testing.T) {
 		docker := &fakeDockerRunner{}
+		records := &fakeDeploymentRecordStore{}
 		resolver := &fakeDeploymentPlanResolver{plan: deploymentPlan{
 			Name:            "multi-service-app",
 			Driver:          composeDriver,
@@ -420,6 +442,7 @@ func TestRunDeploy(t *testing.T) {
 			docker,
 			&fakeHealthChecker{},
 			resolver,
+			records,
 		)
 		if err != nil {
 			t.Fatalf("deploy error = %v", err)
@@ -451,6 +474,9 @@ func TestRunDeploy(t *testing.T) {
 		if stdout.String() != wantOutput {
 			t.Errorf("stdout = %q, want %q", stdout.String(), wantOutput)
 		}
+		if len(records.records) != 1 || records.records[0].ComposeProject != "forge-multi-service-app" {
+			t.Errorf("deployment records = %#v, want Compose project record", records.records)
+		}
 	})
 
 	t.Run("rejects an existing Compose deployment", func(t *testing.T) {
@@ -464,7 +490,7 @@ func TestRunDeploy(t *testing.T) {
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
 
-		err := runComposeDeploy(context.Background(), &stdout, &stderr, docker, plan)
+		err := runComposeDeploy(context.Background(), &stdout, &stderr, docker, &fakeDeploymentRecordStore{}, plan)
 		if err == nil || !strings.Contains(err.Error(), "already deployed as Compose project") {
 			t.Fatalf("error = %v, want existing Compose deployment error", err)
 		}
@@ -484,7 +510,7 @@ func TestRunDeploy(t *testing.T) {
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
 
-		err := runComposeDeploy(context.Background(), &stdout, &stderr, docker, plan)
+		err := runComposeDeploy(context.Background(), &stdout, &stderr, docker, &fakeDeploymentRecordStore{}, plan)
 		if err == nil || !strings.Contains(err.Error(), "deploy multi-service-app Compose project") {
 			t.Fatalf("error = %v, want wrapped Compose error", err)
 		}
@@ -520,6 +546,7 @@ func TestRunDeploy(t *testing.T) {
 					docker,
 					&fakeHealthChecker{},
 					&fakeDeploymentPlanResolver{plan: plan},
+					&fakeDeploymentRecordStore{},
 				)
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 					t.Fatalf("error = %v, want error containing %q", err, tt.wantError)
@@ -758,6 +785,7 @@ func invokeWithHealth(
 		docker,
 		health,
 		&fakeDeploymentPlanResolver{plan: helloAPIPlan},
+		&fakeDeploymentRecordStore{},
 	)
 	return stdout.String(), stderr.String(), err
 }

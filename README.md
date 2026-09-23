@@ -112,6 +112,17 @@ driver, and deploys that immutable checkout. The `.forge` directory is ignored
 by Git. Successful remote deployments print their source URL and revision.
 Single-container deployments also store both values as Docker labels.
 
+After a successful deployment, Forge atomically records the resolved source,
+revision, driver, runtime settings, and deployment time in:
+
+```text
+.forge/deployments/<application>.json
+```
+
+This is Forge's first persistent control-plane state. It will be the input for
+safe updates and rollbacks rather than relying only on whichever containers
+happen to exist in Docker.
+
 Choose a different managed workspace when needed:
 
 ```sh

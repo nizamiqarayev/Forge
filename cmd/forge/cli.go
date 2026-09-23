@@ -44,6 +44,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		execDockerRunner{},
 		newHTTPHealthChecker(),
 		newFileDeploymentPlanResolver(),
+		newFileDeploymentRecordStore(),
 	)
 }
 
@@ -55,6 +56,7 @@ func runWithDependencies(
 	docker dockerRunner,
 	health healthChecker,
 	plans deploymentPlanResolver,
+	records deploymentRecordStore,
 ) error {
 	if len(args) == 0 {
 		return writeUsage(stdout)
@@ -64,7 +66,7 @@ func runWithDependencies(
 	case "help", "-h", "--help":
 		return writeUsage(stdout)
 	case "deploy":
-		return runDeploy(ctx, args[1:], stdout, stderr, docker, health, plans)
+		return runDeploy(ctx, args[1:], stdout, stderr, docker, health, plans, records)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, docker, health)
 	case "logs":
@@ -86,6 +88,7 @@ func runDeploy(
 	docker dockerRunner,
 	health healthChecker,
 	plans deploymentPlanResolver,
+	records deploymentRecordStore,
 ) error {
 	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -117,6 +120,10 @@ func runDeploy(
 	if err != nil {
 		return fmt.Errorf("resolve application: %w", err)
 	}
+	plan.Workspace, err = filepath.Abs(*workspace)
+	if err != nil {
+		return fmt.Errorf("resolve Forge workspace %s: %w", *workspace, err)
+	}
 
 	switch plan.Driver {
 	case composeDriver:
@@ -126,9 +133,9 @@ func runDeploy(
 		if strings.TrimSpace(*imageRef) != "" {
 			return fmt.Errorf("--image cannot override a Compose deployment; configure service images in %s", plan.ComposeFile)
 		}
-		return runComposeDeploy(ctx, stdout, stderr, docker, plan)
+		return runComposeDeploy(ctx, stdout, stderr, docker, records, plan)
 	case containerDriver:
-		return runContainerDeploy(ctx, stdout, stderr, docker, health, plan, *port, *imageRef)
+		return runContainerDeploy(ctx, stdout, stderr, docker, health, records, plan, *port, *imageRef)
 	default:
 		return fmt.Errorf("unsupported deployment driver %q", plan.Driver)
 	}
@@ -140,6 +147,7 @@ func runContainerDeploy(
 	stderr io.Writer,
 	docker dockerRunner,
 	health healthChecker,
+	records deploymentRecordStore,
 	plan deploymentPlan,
 	port int,
 	imageRef string,
@@ -238,6 +246,24 @@ func runContainerDeploy(
 	if err := health.Wait(healthCtx, healthURL); err != nil {
 		return fmt.Errorf("wait for %s health: %w", app, err)
 	}
+	applicationPath, err := filepath.Abs(plan.ApplicationPath)
+	if err != nil {
+		return fmt.Errorf("%s is running but resolve application path for deployment record: %w", app, err)
+	}
+	if err := records.Save(plan.Workspace, deploymentRecord{
+		Name:            app,
+		Driver:          containerDriver,
+		Source:          plan.Source,
+		Revision:        plan.Revision,
+		ApplicationPath: applicationPath,
+		Image:           selectedImage,
+		HostPort:        port,
+		ContainerPort:   plan.ContainerPort,
+		HealthPath:      plan.HealthPath,
+		Dockerfile:      plan.Dockerfile,
+	}); err != nil {
+		return fmt.Errorf("%s is running but save deployment record: %w", app, err)
+	}
 
 	return writeString(
 		stdout,
@@ -251,6 +277,7 @@ func runComposeDeploy(
 	stdout io.Writer,
 	stderr io.Writer,
 	docker dockerRunner,
+	records deploymentRecordStore,
 	plan deploymentPlan,
 ) error {
 	project := containerName(plan.Name)
@@ -285,6 +312,25 @@ func runComposeDeploy(
 	)
 	if err := docker.Run(ctx, stdout, stderr, upArgs...); err != nil {
 		return fmt.Errorf("deploy %s Compose project: %w", plan.Name, err)
+	}
+	absoluteComposeFile, err := filepath.Abs(composeFile)
+	if err != nil {
+		return fmt.Errorf("%s is running but resolve Compose file for deployment record: %w", plan.Name, err)
+	}
+	applicationPath, err := filepath.Abs(plan.ApplicationPath)
+	if err != nil {
+		return fmt.Errorf("%s is running but resolve application path for deployment record: %w", plan.Name, err)
+	}
+	if err := records.Save(plan.Workspace, deploymentRecord{
+		Name:            plan.Name,
+		Driver:          composeDriver,
+		Source:          plan.Source,
+		Revision:        plan.Revision,
+		ApplicationPath: applicationPath,
+		ComposeProject:  project,
+		ComposeFiles:    []string{absoluteComposeFile},
+	}); err != nil {
+		return fmt.Errorf("%s is running but save deployment record: %w", plan.Name, err)
 	}
 
 	return writeString(

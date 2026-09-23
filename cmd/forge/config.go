@@ -47,6 +47,7 @@ type deploymentPlan struct {
 	Name            string
 	Driver          deploymentDriver
 	ApplicationPath string
+	Workspace       string
 	Source          string
 	Revision        string
 	Dockerfile      string
