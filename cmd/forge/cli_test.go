@@ -41,6 +41,8 @@ type fakeDeploymentPlanResolver struct {
 type fakeDeploymentRecordStore struct {
 	workspaces []string
 	records    []deploymentRecord
+	current    deploymentRecord
+	history    []deploymentRecord
 	err        error
 }
 
@@ -48,6 +50,14 @@ func (f *fakeDeploymentRecordStore) Save(workspace string, record deploymentReco
 	f.workspaces = append(f.workspaces, workspace)
 	f.records = append(f.records, record)
 	return f.err
+}
+
+func (f *fakeDeploymentRecordStore) Load(_ string, _ string) (deploymentRecord, error) {
+	return f.current, f.err
+}
+
+func (f *fakeDeploymentRecordStore) History(_ string, _ string) ([]deploymentRecord, error) {
+	return append([]deploymentRecord(nil), f.history...), f.err
 }
 
 func (f *fakeDeploymentPlanResolver) Resolve(_ context.Context, source, workspace string) (deploymentPlan, error) {

@@ -119,9 +119,25 @@ revision, driver, runtime settings, and deployment time in:
 .forge/deployments/<application>.json
 ```
 
-This is Forge's first persistent control-plane state. It will be the input for
-safe updates and rollbacks rather than relying only on whichever containers
-happen to exist in Docker.
+This is Forge's first persistent control-plane state. It drives safe updates
+and rollbacks rather than relying only on whichever containers happen to exist
+in Docker.
+
+For recorded Compose deployments, Forge can fetch the latest Git revision,
+apply it, and automatically restore the previous Compose revision if the update
+does not become running or healthy:
+
+```sh
+forge update malcore
+forge history malcore
+forge rollback malcore
+```
+
+Each successful revision change archives the prior record under
+`.forge/deployments/<application>/history/`. Rollback selects the newest prior
+revision. Update and rollback currently target the Compose driver; the
+single-container replacement strategy will be implemented separately because
+it requires an explicit container handover and recovery sequence.
 
 Choose a different managed workspace when needed:
 

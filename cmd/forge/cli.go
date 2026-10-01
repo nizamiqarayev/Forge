@@ -20,9 +20,13 @@ const usage = `Forge operates local application workloads.
 Usage:
   forge deploy [options] <application-path-or-git-url>
   forge <status|logs|stop|delete> <application-name>
+  forge <update|rollback|history> [--workspace DIR] <application-name>
 
 Available commands:
   deploy  Build and start an application
+  update  Deploy the latest revision of a recorded Git source
+  rollback  Restore the previous recorded revision
+  history  Show current and previous deployment revisions
   status  Show an application's container status
   logs    Show an application's container logs
   stop    Stop an application gracefully
@@ -67,6 +71,12 @@ func runWithDependencies(
 		return writeUsage(stdout)
 	case "deploy":
 		return runDeploy(ctx, args[1:], stdout, stderr, docker, health, plans, records)
+	case "update":
+		return runUpdate(ctx, args[1:], stdout, stderr, docker, plans, records)
+	case "rollback":
+		return runRollback(ctx, args[1:], stdout, stderr, docker, records)
+	case "history":
+		return runHistory(args[1:], stdout, stderr, records)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, docker, health)
 	case "logs":
